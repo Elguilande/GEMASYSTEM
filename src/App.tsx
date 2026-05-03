@@ -1,0 +1,458 @@
+import { useState, useEffect, useCallback, useRef } from 'react';
+import {
+  Cloud,
+  Upload,
+  Download,
+  Wifi,
+  WifiOff,
+  FileText,
+  CheckCircle,
+  AlertCircle,
+  Info,
+  Loader2,
+  Trash2,
+  RefreshCw,
+  Shield,
+} from 'lucide-react';
+import { WebSocketClient, type WebSocketMessage } from './lib/websocket';
+
+type StatusType = 'info' | 'success' | 'error' | 'loading';
+
+interface StatusMessage {
+  id: number;
+  type: StatusType;
+  text: string;
+}
+
+interface StoredData {
+  name: string;
+  content: string;
+  sessionId: string;
+  timestamp: string;
+}
+
+const SESSION_ID = Math.random().toString(36).slice(2, 10).toUpperCase();
+const WS_URL = 'https://gemasystem-production.up.railway.app';
+
+export default function App() {
+  const [connected, setConnected] = useState(false);
+  const [fileName, setFileName] = useState('');
+  const [fileContent, setFileContent] = useState('');
+  const [readName, setReadName] = useState('');
+  const [statusMessages, setStatusMessages] = useState<StatusMessage[]>([]);
+  const [entries, setEntries] = useState<StoredData[]>([]);
+  const [isSending, setIsSending] = useState(false);
+  const [isReading, setIsReading] = useState(false);
+  const [readResult, setReadResult] = useState<StoredData | null>(null);
+  const wsRef = useRef<WebSocketClient | null>(null);
+  const msgIdRef = useRef(0);
+
+  const addStatus = useCallback((type: StatusType, text: string) => {
+    const id = ++msgIdRef.current;
+    setStatusMessages(prev => [{ id, type, text }, ...prev].slice(0, 20));
+  }, []);
+
+  const handleWebSocketMessage = useCallback((message: WebSocketMessage) => {
+    switch (message.type) {
+      case 'connect':
+        setConnected(true);
+        addStatus('success', `Conectado ao servidor Gema | Sessão: ${SESSION_ID}`);
+        break;
+
+      case 'disconnect':
+        setConnected(false);
+        addStatus('info', 'Desconectado do servidor Gema.');
+        break;
+
+      case 'send_success':
+        setIsSending(false);
+        addStatus('success', `Dados enviados com sucesso: "${message.fileName}"`);
+        setFileName('');
+        setFileContent('');
+        break;
+
+      case 'send_error':
+        setIsSending(false);
+        addStatus('error', `Erro ao enviar dados: ${message.error}`);
+        break;
+
+      case 'read_result':
+        setIsReading(false);
+        if (message.data && message.data.length > 0) {
+          const result = message.data[0];
+          setReadResult({
+            name: result.name,
+            content: result.content,
+            sessionId: result.sessionId,
+            timestamp: result.timestamp,
+          });
+          addStatus('success', `Dados recebidos: "${result.name}"`);
+        } else {
+          addStatus('error', `Nenhum dado encontrado com o nome "${readName}".`);
+        }
+        break;
+
+      case 'data_received':
+        if (message.data && message.data.length > 0) {
+          const newEntry = message.data[0];
+          setEntries(prev => [newEntry, ...prev].slice(0, 50));
+          if (newEntry.sessionId !== SESSION_ID) {
+            addStatus('info', `Novo dado recebido de outro dispositivo: "${newEntry.name}"`);
+          }
+        }
+        break;
+
+      case 'status':
+        if (message.data && message.data.length > 0) {
+          setEntries(message.data.slice(0, 50));
+        }
+        break;
+
+      default:
+        break;
+    }
+  }, [readName, addStatus]);
+
+  const connect = useCallback(() => {
+    if (connected || wsRef.current?.isConnected()) return;
+
+    addStatus('loading', 'A conectar ao servidor Gema...');
+
+    const ws = new WebSocketClient(WS_URL, SESSION_ID);
+    wsRef.current = ws;
+
+    ws.onMessage(handleWebSocketMessage);
+
+    ws.connect(
+      () => {
+        setConnected(true);
+      },
+      (error) => {
+        setConnected(false);
+        addStatus('error', `Erro de conexão: ${error}. Tente novamente.`);
+      }
+    ).catch((e) => {
+      console.error('Erro ao conectar:', e);
+      addStatus('error', 'Falha ao conectar ao servidor.');
+    });
+  }, [connected, addStatus, handleWebSocketMessage]);
+
+  const disconnect = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.disconnect();
+      wsRef.current = null;
+    }
+    setConnected(false);
+    addStatus('info', 'Desconectado do servidor Gema.');
+  }, [addStatus]);
+
+  useEffect(() => {
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.disconnect();
+        wsRef.current = null;
+      }
+    };
+  }, []);
+
+  const handleSend = () => {
+    if (!fileName.trim()) {
+      addStatus('error', 'Por favor, insira um nome para o arquivo ou mensagem.');
+      return;
+    }
+    if (!fileContent.trim()) {
+      addStatus('error', 'Por favor, insira o conteúdo a enviar.');
+      return;
+    }
+    if (!connected || !wsRef.current?.isConnected()) {
+      addStatus('error', 'Não está conectado ao servidor.');
+      return;
+    }
+
+    setIsSending(true);
+    addStatus('loading', `A enviar "${fileName}" para o armazenamento...`);
+    wsRef.current.sendData(fileName.trim(), fileContent.trim());
+  };
+
+  const handleRead = () => {
+    if (!readName.trim()) {
+      addStatus('error', 'Por favor, insira o nome do arquivo ou mensagem a ler.');
+      return;
+    }
+    if (!connected || !wsRef.current?.isConnected()) {
+      addStatus('error', 'Não está conectado ao servidor.');
+      return;
+    }
+
+    setIsReading(true);
+    setReadResult(null);
+    addStatus('loading', `A procurar "${readName}" no armazenamento...`);
+    wsRef.current.readData(readName.trim());
+  };
+
+  const handleDeleteAll = () => {
+    if (!window.confirm('Apagar todos os dados do armazenamento?')) return;
+    if (!connected || !wsRef.current?.isConnected()) {
+      addStatus('error', 'Não está conectado ao servidor.');
+      return;
+    }
+    setEntries([]);
+    setReadResult(null);
+    addStatus('info', 'Armazenamento limpo.');
+  };
+
+  const statusIcon = (type: StatusType) => {
+    if (type === 'success') return <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />;
+    if (type === 'error') return <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />;
+    if (type === 'loading') return <Loader2 className="w-4 h-4 text-blue-400 animate-spin shrink-0" />;
+    return <Info className="w-4 h-4 text-slate-400 shrink-0" />;
+  };
+
+  const formatTime = (iso: string) => {
+    try {
+      return new Date(iso).toLocaleTimeString('pt-PT', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    } catch {
+      return iso;
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-[#060C14] text-slate-100 font-sans">
+      {/* Header */}
+      <header className="border-b border-slate-800 bg-[#0A1220]/80 backdrop-blur-md sticky top-0 z-10">
+        <div className="max-w-2xl mx-auto px-4 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-900/40">
+              <Shield className="w-5 h-5 text-white" />
+            </div>
+            <div>
+              <h1 className="text-base font-bold tracking-tight text-white leading-tight">
+                Gema - Sistema de Armazenamento Seguro
+              </h1>
+              <p className="text-xs text-slate-500">Versão 1 &middot; Teste &middot; Sessão: {SESSION_ID}</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            {connected ? (
+              <span className="flex items-center gap-1.5 text-xs font-medium text-emerald-400 bg-emerald-900/30 border border-emerald-800/50 px-2.5 py-1 rounded-full">
+                <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" />
+                Online
+              </span>
+            ) : (
+              <span className="flex items-center gap-1.5 text-xs font-medium text-red-400 bg-red-900/20 border border-red-800/40 px-2.5 py-1 rounded-full">
+                <span className="w-1.5 h-1.5 bg-red-400 rounded-full" />
+                Offline
+              </span>
+            )}
+          </div>
+        </div>
+      </header>
+
+      <main className="max-w-2xl mx-auto px-4 py-6 space-y-5">
+
+        {/* Connection controls */}
+        <div className="flex gap-3">
+          <button
+            onClick={connect}
+            disabled={connected}
+            className="flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-xl font-semibold text-sm bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-200 shadow-lg shadow-blue-900/30"
+          >
+            <Wifi className="w-4 h-4" />
+            Conectar
+          </button>
+          <button
+            onClick={disconnect}
+            disabled={!connected}
+            className="flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-xl font-semibold text-sm bg-slate-700 hover:bg-slate-600 disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-200"
+          >
+            <WifiOff className="w-4 h-4" />
+            Desconectar
+          </button>
+          <button
+            onClick={() => {
+              if (connected && wsRef.current?.isConnected()) {
+                wsRef.current.send({ type: 'status' });
+                addStatus('info', 'Estado atualizado.');
+              }
+            }}
+            disabled={!connected}
+            title="Atualizar lista"
+            className="flex items-center justify-center w-12 h-12 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-200"
+          >
+            <RefreshCw className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Send Section */}
+        <div className="bg-[#0D1626] border border-slate-800 rounded-2xl p-5 space-y-4">
+          <div className="flex items-center gap-2 mb-1">
+            <Upload className="w-4 h-4 text-blue-400" />
+            <h2 className="text-sm font-semibold text-slate-200 uppercase tracking-wider">Enviar para Armazenamento</h2>
+          </div>
+
+          <div>
+            <label className="block text-xs text-slate-400 mb-1.5 font-medium">Nome do Arquivo ou Mensagem</label>
+            <input
+              type="text"
+              value={fileName}
+              onChange={e => setFileName(e.target.value)}
+              placeholder="ex: documento.txt, mensagem-secreta..."
+              className="w-full bg-[#060C14] border border-slate-700 rounded-xl px-4 py-3 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 transition-all"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs text-slate-400 mb-1.5 font-medium">Conteúdo</label>
+            <textarea
+              value={fileContent}
+              onChange={e => setFileContent(e.target.value)}
+              placeholder="Escreva aqui o conteúdo a enviar para o armazenamento seguro..."
+              rows={5}
+              className="w-full bg-[#060C14] border border-slate-700 rounded-xl px-4 py-3 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 transition-all resize-none"
+            />
+          </div>
+
+          <button
+            onClick={handleSend}
+            disabled={isSending || !connected}
+            className="w-full flex items-center justify-center gap-2 py-4 rounded-xl font-bold text-base bg-blue-600 hover:bg-blue-500 active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-200 shadow-lg shadow-blue-900/30"
+          >
+            {isSending ? <Loader2 className="w-5 h-5 animate-spin" /> : <Upload className="w-5 h-5" />}
+            {isSending ? 'A enviar...' : 'Enviar Dados para o Armazenamento'}
+          </button>
+        </div>
+
+        {/* Read Section */}
+        <div className="bg-[#0D1626] border border-slate-800 rounded-2xl p-5 space-y-4">
+          <div className="flex items-center gap-2 mb-1">
+            <Download className="w-4 h-4 text-cyan-400" />
+            <h2 className="text-sm font-semibold text-slate-200 uppercase tracking-wider">Ler Dados do Armazenamento</h2>
+          </div>
+
+          <div>
+            <label className="block text-xs text-slate-400 mb-1.5 font-medium">Nome do Arquivo ou Mensagem</label>
+            <input
+              type="text"
+              value={readName}
+              onChange={e => setReadName(e.target.value)}
+              placeholder="ex: documento.txt, mensagem-secreta..."
+              className="w-full bg-[#060C14] border border-slate-700 rounded-xl px-4 py-3 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/30 transition-all"
+            />
+          </div>
+
+          <button
+            onClick={handleRead}
+            disabled={isReading || !connected}
+            className="w-full flex items-center justify-center gap-2 py-4 rounded-xl font-bold text-base bg-cyan-700 hover:bg-cyan-600 active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-200 shadow-lg shadow-cyan-900/30"
+          >
+            {isReading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Download className="w-5 h-5" />}
+            {isReading ? 'A procurar...' : 'Ler Dados do Armazenamento'}
+          </button>
+
+          {readResult && (
+            <div className="bg-[#060C14] border border-cyan-800/50 rounded-xl p-4 space-y-2">
+              <div className="flex items-center gap-2">
+                <FileText className="w-4 h-4 text-cyan-400 shrink-0" />
+                <span className="text-sm font-semibold text-cyan-300 truncate">{readResult.name}</span>
+                <span className="ml-auto text-xs text-slate-600">{formatTime(readResult.timestamp)}</span>
+              </div>
+              <p className="text-sm text-slate-300 whitespace-pre-wrap break-words leading-relaxed border-t border-slate-800 pt-3">
+                {readResult.content}
+              </p>
+              <p className="text-xs text-slate-600">Sessão de origem: {readResult.sessionId}</p>
+            </div>
+          )}
+        </div>
+
+        {/* Status Area */}
+        <div className="bg-[#0D1626] border border-slate-800 rounded-2xl p-5">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold text-slate-200 uppercase tracking-wider">Estado do Sistema</h2>
+            {statusMessages.length > 0 && (
+              <button
+                onClick={() => setStatusMessages([])}
+                className="text-xs text-slate-600 hover:text-slate-400 transition-colors"
+              >
+                Limpar
+              </button>
+            )}
+          </div>
+          <div className="space-y-2 max-h-52 overflow-y-auto">
+            {statusMessages.length === 0 ? (
+              <p className="text-xs text-slate-600 italic text-center py-4">Nenhuma mensagem de estado ainda.</p>
+            ) : (
+              statusMessages.map(msg => (
+                <div
+                  key={msg.id}
+                  className="flex items-start gap-2 text-xs py-2 px-3 rounded-lg bg-[#060C14] border border-slate-800/80"
+                >
+                  {statusIcon(msg.type)}
+                  <span className={`leading-relaxed ${
+                    msg.type === 'success' ? 'text-emerald-300' :
+                    msg.type === 'error' ? 'text-red-300' :
+                    msg.type === 'loading' ? 'text-blue-300' :
+                    'text-slate-400'
+                  }`}>{msg.text}</span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* Recent Entries */}
+        <div className="bg-[#0D1626] border border-slate-800 rounded-2xl p-5">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <Cloud className="w-4 h-4 text-slate-400" />
+              <h2 className="text-sm font-semibold text-slate-200 uppercase tracking-wider">
+                Armazenamento ({entries.length})
+              </h2>
+            </div>
+            {entries.length > 0 && (
+              <button
+                onClick={handleDeleteAll}
+                className="flex items-center gap-1 text-xs text-red-500 hover:text-red-400 transition-colors"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                Apagar tudo
+              </button>
+            )}
+          </div>
+          <div className="space-y-2 max-h-64 overflow-y-auto">
+            {entries.length === 0 ? (
+              <p className="text-xs text-slate-600 italic text-center py-6">
+                Nenhum dado armazenado. Envie dados para começar.
+              </p>
+            ) : (
+              entries.map((entry, idx) => (
+                <div
+                  key={idx}
+                  className="flex items-center gap-3 py-2.5 px-3 rounded-xl bg-[#060C14] border border-slate-800/80 hover:border-slate-700 transition-all cursor-pointer group"
+                  onClick={() => {
+                    setReadName(entry.name);
+                    setReadResult(entry);
+                    addStatus('info', `A visualizar: "${entry.name}"`);
+                  }}
+                >
+                  <FileText className="w-4 h-4 text-slate-500 shrink-0 group-hover:text-blue-400 transition-colors" />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium text-slate-200 truncate">{entry.name}</p>
+                    <p className="text-xs text-slate-600 truncate">{entry.content.slice(0, 60)}{entry.content.length > 60 ? '...' : ''}</p>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <p className="text-xs text-slate-600">{formatTime(entry.timestamp)}</p>
+                    <p className="text-xs text-slate-700">{entry.sessionId === SESSION_ID ? 'Eu' : entry.sessionId}</p>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        <p className="text-center text-xs text-slate-700 pb-4">
+          Gema Storage &middot; Dados transmitidos via canal encriptado &middot; {new Date().getFullYear()}
+        </p>
+      </main>
+    </div>
+  );
+}
