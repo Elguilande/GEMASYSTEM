@@ -14,7 +14,7 @@ import {
   RefreshCw,
   Shield,
 } from 'lucide-react';
-import { WebSocketClient, type WebSocketMessage } from './lib/websocket';
+import { createSocketIOClient, type StorageData } from './lib/socketio';
 
 type StatusType = 'info' | 'success' | 'error' | 'loading';
 
@@ -24,15 +24,8 @@ interface StatusMessage {
   text: string;
 }
 
-interface StoredData {
-  name: string;
-  content: string;
-  sessionId: string;
-  timestamp: string;
-}
-
 const SESSION_ID = Math.random().toString(36).slice(2, 10).toUpperCase();
-const WS_URL = 'https://gemasystem-production.up.railway.app';
+const SOCKET_URL = 'https://gemasystem-production.up.railway.app';
 
 export default function App() {
   const [connected, setConnected] = useState(false);
@@ -40,11 +33,11 @@ export default function App() {
   const [fileContent, setFileContent] = useState('');
   const [readName, setReadName] = useState('');
   const [statusMessages, setStatusMessages] = useState<StatusMessage[]>([]);
-  const [entries, setEntries] = useState<StoredData[]>([]);
+  const [entries, setEntries] = useState<StorageData[]>([]);
   const [isSending, setIsSending] = useState(false);
   const [isReading, setIsReading] = useState(false);
-  const [readResult, setReadResult] = useState<StoredData | null>(null);
-  const wsRef = useRef<WebSocketClient | null>(null);
+  const [readResult, setReadResult] = useState<StorageData | null>(null);
+  const socketClientRef = useRef<ReturnType<typeof createSocketIOClient> | null>(null);
   const msgIdRef = useRef(0);
 
   const addStatus = useCallback((type: StatusType, text: string) => {
@@ -52,95 +45,68 @@ export default function App() {
     setStatusMessages(prev => [{ id, type, text }, ...prev].slice(0, 20));
   }, []);
 
-  const handleWebSocketMessage = useCallback((message: WebSocketMessage) => {
-    switch (message.type) {
-      case 'connect':
-        setConnected(true);
-        addStatus('success', `Conectado ao servidor Gema | Sessão: ${SESSION_ID}`);
-        break;
+  const connect = useCallback(() => {
+    if (connected || socketClientRef.current?.isConnected()) return;
 
-      case 'disconnect':
-        setConnected(false);
-        addStatus('info', 'Desconectado do servidor Gema.');
-        break;
+    addStatus('loading', 'A conectar ao servidor Gema via Socket.io...');
 
-      case 'send_success':
-        setIsSending(false);
-        addStatus('success', `Dados enviados com sucesso: "${message.fileName}"`);
+    const socketClient = createSocketIOClient(SOCKET_URL, SESSION_ID);
+    socketClientRef.current = socketClient;
+
+    socketClient.onDadosEnviados((data) => {
+      setIsSending(false);
+      if (data.sucesso) {
+        addStatus('success', `Dados enviados com sucesso: "${fileName}"`);
         setFileName('');
         setFileContent('');
-        break;
+      } else {
+        addStatus('error', `Erro ao enviar dados: ${data.mensagem}`);
+      }
+    });
 
-      case 'send_error':
-        setIsSending(false);
-        addStatus('error', `Erro ao enviar dados: ${message.error}`);
-        break;
+    socketClient.onDadosRecebidos((dados: StorageData[]) => {
+      setIsReading(false);
+      if (dados && dados.length > 0) {
+        const resultado = dados[0];
+        setReadResult({
+          nome: resultado.nome,
+          conteudo: resultado.conteudo,
+          sessionId: resultado.sessionId,
+          timestamp: resultado.timestamp,
+        });
+        addStatus('success', `Dados recebidos: "${resultado.nome}"`);
+      } else {
+        addStatus('error', `Nenhum dado encontrado com o nome "${readName}".`);
+      }
+    });
 
-      case 'read_result':
-        setIsReading(false);
-        if (message.data && message.data.length > 0) {
-          const result = message.data[0];
-          setReadResult({
-            name: result.name,
-            content: result.content,
-            sessionId: result.sessionId,
-            timestamp: result.timestamp,
-          });
-          addStatus('success', `Dados recebidos: "${result.name}"`);
-        } else {
-          addStatus('error', `Nenhum dado encontrado com o nome "${readName}".`);
-        }
-        break;
+    socketClient.onNovosDados((dados: StorageData) => {
+      setEntries(prev => [dados, ...prev].slice(0, 50));
+      if (dados.sessionId !== SESSION_ID) {
+        addStatus('info', `Novo dado recebido de outro dispositivo: "${dados.nome}"`);
+      }
+    });
 
-      case 'data_received':
-        if (message.data && message.data.length > 0) {
-          const newEntry = message.data[0];
-          setEntries(prev => [newEntry, ...prev].slice(0, 50));
-          if (newEntry.sessionId !== SESSION_ID) {
-            addStatus('info', `Novo dado recebido de outro dispositivo: "${newEntry.name}"`);
-          }
-        }
-        break;
+    socketClient.onErro((erro: string) => {
+      addStatus('error', `Erro do servidor: ${erro}`);
+    });
 
-      case 'status':
-        if (message.data && message.data.length > 0) {
-          setEntries(message.data.slice(0, 50));
-        }
-        break;
-
-      default:
-        break;
-    }
-  }, [readName, addStatus]);
-
-  const connect = useCallback(() => {
-    if (connected || wsRef.current?.isConnected()) return;
-
-    addStatus('loading', 'A conectar ao servidor Gema...');
-
-    const ws = new WebSocketClient(WS_URL, SESSION_ID);
-    wsRef.current = ws;
-
-    ws.onMessage(handleWebSocketMessage);
-
-    ws.connect(
+    socketClient.connect(
       () => {
         setConnected(true);
+        addStatus('success', `Conectado ao servidor Gema | Sessão: ${SESSION_ID}`);
       },
       (error) => {
         setConnected(false);
-        addStatus('error', `Erro de conexão: ${error}. Tente novamente.`);
+        addStatus('error', `Erro de conexão: ${error}`);
       }
-    ).catch((e) => {
-      console.error('Erro ao conectar:', e);
-      addStatus('error', 'Falha ao conectar ao servidor.');
-    });
-  }, [connected, addStatus, handleWebSocketMessage]);
+    );
+  }, [connected, addStatus, fileName, readName]);
 
   const disconnect = useCallback(() => {
-    if (wsRef.current) {
-      wsRef.current.disconnect();
-      wsRef.current = null;
+    if (socketClientRef.current) {
+      socketClientRef.current.disconnect();
+      socketClientRef.current = null;
     }
     setConnected(false);
     addStatus('info', 'Desconectado do servidor Gema.');
@@ -148,9 +114,9 @@ export default function App() {
 
   useEffect(() => {
     return () => {
-      if (wsRef.current) {
-        wsRef.current.disconnect();
-        wsRef.current = null;
+      if (socketClientRef.current) {
+        socketClientRef.current.disconnect();
+        socketClientRef.current = null;
       }
     };
   }, []);
@@ -164,14 +130,14 @@ export default function App() {
       addStatus('error', 'Por favor, insira o conteúdo a enviar.');
       return;
     }
-    if (!connected || !wsRef.current?.isConnected()) {
+    if (!connected || !socketClientRef.current?.isConnected()) {
       addStatus('error', 'Não está conectado ao servidor.');
       return;
     }
 
     setIsSending(true);
     addStatus('loading', `A enviar "${fileName}" para o armazenamento...`);
-    wsRef.current.sendData(fileName.trim(), fileContent.trim());
+    socketClientRef.current.enviarDados(fileName.trim(), fileContent.trim());
   };
 
   const handleRead = () => {
@@ -179,7 +145,7 @@ export default function App() {
       addStatus('error', 'Por favor, insira o nome do arquivo ou mensagem a ler.');
       return;
     }
-    if (!connected || !wsRef.current?.isConnected()) {
+    if (!connected || !socketClientRef.current?.isConnected()) {
       addStatus('error', 'Não está conectado ao servidor.');
       return;
     }
@@ -187,15 +153,11 @@ export default function App() {
     setIsReading(true);
     setReadResult(null);
     addStatus('loading', `A procurar "${readName}" no armazenamento...`);
-    wsRef.current.readData(readName.trim());
+    socketClientRef.current.pedirDados(readName.trim());
   };
 
   const handleDeleteAll = () => {
     if (!window.confirm('Apagar todos os dados do armazenamento?')) return;
-    if (!connected || !wsRef.current?.isConnected()) {
-      addStatus('error', 'Não está conectado ao servidor.');
-      return;
-    }
     setEntries([]);
     setReadResult(null);
     addStatus('info', 'Armazenamento limpo.');
@@ -270,8 +232,7 @@ export default function App() {
           </button>
           <button
             onClick={() => {
-              if (connected && wsRef.current?.isConnected()) {
-                wsRef.current.send({ type: 'status' });
+              if (connected) {
                 addStatus('info', 'Estado atualizado.');
               }
             }}
@@ -353,11 +314,11 @@ export default function App() {
             <div className="bg-[#060C14] border border-cyan-800/50 rounded-xl p-4 space-y-2">
               <div className="flex items-center gap-2">
                 <FileText className="w-4 h-4 text-cyan-400 shrink-0" />
-                <span className="text-sm font-semibold text-cyan-300 truncate">{readResult.name}</span>
+                <span className="text-sm font-semibold text-cyan-300 truncate">{readResult.nome}</span>
                 <span className="ml-auto text-xs text-slate-600">{formatTime(readResult.timestamp)}</span>
               </div>
               <p className="text-sm text-slate-300 whitespace-pre-wrap break-words leading-relaxed border-t border-slate-800 pt-3">
-                {readResult.content}
+                {readResult.conteudo}
               </p>
               <p className="text-xs text-slate-600">Sessão de origem: {readResult.sessionId}</p>
             </div>
@@ -429,15 +390,15 @@ export default function App() {
                   key={idx}
                   className="flex items-center gap-3 py-2.5 px-3 rounded-xl bg-[#060C14] border border-slate-800/80 hover:border-slate-700 transition-all cursor-pointer group"
                   onClick={() => {
-                    setReadName(entry.name);
+                    setReadName(entry.nome);
                     setReadResult(entry);
-                    addStatus('info', `A visualizar: "${entry.name}"`);
+                    addStatus('info', `A visualizar: "${entry.nome}"`);
                   }}
                 >
                   <FileText className="w-4 h-4 text-slate-500 shrink-0 group-hover:text-blue-400 transition-colors" />
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium text-slate-200 truncate">{entry.name}</p>
-                    <p className="text-xs text-slate-600 truncate">{entry.content.slice(0, 60)}{entry.content.length > 60 ? '...' : ''}</p>
+                    <p className="text-sm font-medium text-slate-200 truncate">{entry.nome}</p>
+                    <p className="text-xs text-slate-600 truncate">{entry.conteudo.slice(0, 60)}{entry.conteudo.length > 60 ? '...' : ''}</p>
                   </div>
                   <div className="text-right shrink-0">
                     <p className="text-xs text-slate-600">{formatTime(entry.timestamp)}</p>
@@ -450,7 +411,7 @@ export default function App() {
         </div>
 
         <p className="text-center text-xs text-slate-700 pb-4">
-          Gema Storage &middot; Dados transmitidos via canal encriptado &middot; {new Date().getFullYear()}
+          Gema Storage &middot; Dados transmitidos via Socket.io &middot; {new Date().getFullYear()}
         </p>
       </main>
     </div>
