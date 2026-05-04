@@ -13,10 +13,16 @@ import {
   Trash2,
   RefreshCw,
   Shield,
+  LogOut,
+  User,
 } from 'lucide-react';
+import { supabase, type User as SupabaseUser } from './lib/supabase';
 import { createSocketIOClient, type StorageData } from './lib/socketio';
+import Login from './pages/Login';
+import Register from './pages/Register';
 
 type StatusType = 'info' | 'success' | 'error' | 'loading';
+type AuthPage = 'login' | 'register';
 
 interface StatusMessage {
   id: number;
@@ -27,7 +33,7 @@ interface StatusMessage {
 const SESSION_ID = Math.random().toString(36).slice(2, 10).toUpperCase();
 const SOCKET_URL = 'https://gemasystem-production.up.railway.app';
 
-export default function App() {
+function StorageApp({ user }: { user: SupabaseUser }) {
   const [connected, setConnected] = useState(false);
   const [fileName, setFileName] = useState('');
   const [fileContent, setFileContent] = useState('');
@@ -191,21 +197,27 @@ export default function App() {
               <h1 className="text-base font-bold tracking-tight text-white leading-tight">
                 Gema - Sistema de Armazenamento Seguro
               </h1>
-              <p className="text-xs text-slate-500">Versão 1 &middot; Teste &middot; Sessão: {SESSION_ID}</p>
+              <p className="text-xs text-slate-500">Sessão: {SESSION_ID}</p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            {connected ? (
-              <span className="flex items-center gap-1.5 text-xs font-medium text-emerald-400 bg-emerald-900/30 border border-emerald-800/50 px-2.5 py-1 rounded-full">
-                <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" />
-                Online
-              </span>
-            ) : (
-              <span className="flex items-center gap-1.5 text-xs font-medium text-red-400 bg-red-900/20 border border-red-800/40 px-2.5 py-1 rounded-full">
-                <span className="w-1.5 h-1.5 bg-red-400 rounded-full" />
-                Offline
-              </span>
-            )}
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              {connected ? (
+                <span className="flex items-center gap-1.5 text-xs font-medium text-emerald-400 bg-emerald-900/30 border border-emerald-800/50 px-2.5 py-1 rounded-full">
+                  <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" />
+                  Online
+                </span>
+              ) : (
+                <span className="flex items-center gap-1.5 text-xs font-medium text-red-400 bg-red-900/20 border border-red-800/40 px-2.5 py-1 rounded-full">
+                  <span className="w-1.5 h-1.5 bg-red-400 rounded-full" />
+                  Offline
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2 text-xs text-slate-400 bg-[#0D1626] px-3 py-1.5 rounded-full border border-slate-800">
+              <User className="w-3.5 h-3.5" />
+              {user.email}
+            </div>
           </div>
         </div>
       </header>
@@ -414,6 +426,94 @@ export default function App() {
           Gema Storage &middot; Dados transmitidos via Socket.io &middot; {new Date().getFullYear()}
         </p>
       </main>
+    </div>
+  );
+}
+
+export default function App() {
+  const [user, setUser] = useState<SupabaseUser | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [authPage, setAuthPage] = useState<AuthPage>('login');
+
+  useEffect(() => {
+    const checkAuth = async () => {
+      try {
+        const { data: { session }, error } = await supabase.auth.getSession();
+        if (error) throw error;
+        if (session?.user) {
+          setUser(session.user);
+        }
+      } catch (err) {
+        console.error('Erro ao verificar autenticação:', err);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    checkAuth();
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      async (event, session) => {
+        if (session?.user) {
+          setUser(session.user);
+        } else {
+          setUser(null);
+        }
+      }
+    );
+
+    return () => {
+      subscription?.unsubscribe();
+    };
+  }, []);
+
+  const handleLogout = async () => {
+    try {
+      await supabase.auth.signOut();
+      setUser(null);
+      setAuthPage('login');
+    } catch (err) {
+      console.error('Erro ao fazer logout:', err);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-[#060C14] flex items-center justify-center">
+        <Loader2 className="w-8 h-8 text-blue-400 animate-spin" />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <>
+        {authPage === 'login' ? (
+          <Login
+            onSuccess={() => setUser(supabase.auth.getSession().then(s => s.data.session?.user || null).catch(() => null))}
+            onSwitchToRegister={() => setAuthPage('register')}
+          />
+        ) : (
+          <Register
+            onSuccess={() => setAuthPage('login')}
+            onSwitchToLogin={() => setAuthPage('login')}
+          />
+        )}
+      </>
+    );
+  }
+
+  return (
+    <div>
+      <StorageApp user={user} />
+      <button
+        onClick={handleLogout}
+        className="fixed bottom-6 right-6 flex items-center gap-2 px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-sm font-semibold transition-all shadow-lg"
+        title="Fazer logout"
+      >
+        <LogOut className="w-4 h-4" />
+        Logout
+      </button>
     </div>
   );
 }

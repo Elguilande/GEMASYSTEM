@@ -1,7 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string;
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
+const supabaseUrl = 'https://qmipfevipigfrztjkqdf.supabase.co';
+const supabaseAnonKey = 'sb_publishable_Q83UbI-yq-pF6RSbxP-nkw_--wZeiVZ';
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
@@ -12,4 +12,12 @@ export type StorageEntry = {
   sender_id: string;
   created_at: string;
   updated_at: string;
+};
+
+export type User = {
+  id: string;
+  email: string;
+  user_metadata?: {
+    email?: string;
+  };
 };
